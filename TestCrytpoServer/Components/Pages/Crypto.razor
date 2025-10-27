@@ -1,0 +1,76 @@
+@page "/crypto"
+@rendermode InteractiveServer
+@using TestCrytpoServer.Code
+@inject CryptoInterop CryptoJs
+@inject IHttpClientFactory HttpFactory
+@inject NavigationManager Nav
+
+<h3>Crypto client-side (PBKDF2 + AES-GCM)</h3>
+
+<input @bind="Password" type="password" placeholder="Mot de passe maître" />
+<textarea @bind="Plain" placeholder="Texte clair"></textarea>
+<button @onclick="EncryptAndSave">Chiffrer & Enregistrer</button>
+
+<input @bind="RecordId" placeholder="Id à déchiffrer" />
+<button @onclick="LoadAndDecrypt">Charger & Déchiffrer</button>
+
+<p>@Decrypted</p>
+
+<p><em>@Status</em></p>
+
+@code {
+    string Password = "";
+    string Plain = "";
+    string Decrypted = "";
+    int RecordId;
+    string Status = "";   // petit panneau de statut
+
+    async Task EncryptAndSave()
+    {
+        try
+        {
+            Status = "Chiffrement en cours…";
+            var res = await CryptoJs.EncryptAsync(Plain, Password);
+            var payload = new {
+                ciphertextB64 = res.ciphertextB64,
+                ivB64 = res.ivB64,
+                saltB64 = res.saltB64,
+                iterations = res.iterations
+            };
+
+            var http = HttpFactory.CreateClient();
+            var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/secrets", payload);
+            Status = $"POST /api/secrets → {(int)resp.StatusCode}";
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                Decrypted = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}";
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            Decrypted = "ERR EncryptAndSave: " + ex.Message;
+        }
+    }
+
+    async Task LoadAndDecrypt()
+    {
+        try
+        {
+            Status = "Chargement…";
+            var http = HttpFactory.CreateClient();
+            var rec = await http.GetFromJsonAsync<SecretDto>($"{Nav.BaseUri}api/secrets/{RecordId}");
+            if (rec is null) { Decrypted = "Introuvable"; return; }
+
+            Decrypted = await CryptoJs.DecryptAsync(rec.ciphertextB64, Password, rec.ivB64, rec.saltB64, rec.iterations);
+            Status = "OK";
+        }
+        catch (Exception ex)
+        {
+            Decrypted = "ERR LoadAndDecrypt: " + ex.Message;
+        }
+    }
+
+    public record SecretDto(int id, string ciphertextB64, string ivB64, string saltB64, int iterations);
+}
