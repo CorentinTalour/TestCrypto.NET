@@ -93,7 +93,7 @@ export async function encryptEntrySeparateFields(password) {
         cipherPasswordB64: p.cipherB64, ivPasswordB64: p.ivB64,
         cipherNameB64:     n.cipherB64, ivNameB64:     n.ivB64,
         cipherUrlB64:      u.cipherB64, ivUrlB64:      u.ivB64,
-        cipherNotesB64:    no.cipherB64,ivNotesB64:    no.ivB64,
+        cipherNotesB64:    no.cipherB64, ivNotesB64:   no.ivB64,
         saltB64: b64(salt),
         iterations: 600000
     };
@@ -132,3 +132,100 @@ export async function decryptEntrySeparateFields(record, password) {
 
 // --- DEBUG (facultatif) ---
 console.log("[crypto.js] exports:", { encryptEntrySeparateFields, decryptEntrySeparateFields });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// createVaultVerifier(password, iterations = 600000)
+// - génère vaultSalt (16 o), dérive 64 octets via PBKDF2
+// - split : verifyPart = first 32 o ; encKeyMaterial = last 32 o
+// - verifier = SHA-256(verifyPart) -> stocker côté serveur en Base64
+// - retourne { vaultSaltB64, iterations, verifierB64, encKeyMaterialB64 }
+//   Note: encKeyMaterialB64 n'est pas à stocker dans la BDD. C'est utile en RAM côté client.
+export async function createVaultVerifier(password, iterations = 600000) {
+    const enc = new TextEncoder();
+    const dec = new TextDecoder();
+
+    const b64 = a => btoa(String.fromCharCode(...new Uint8Array(a)));
+    const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+    // 1) génère un salt pour le vault
+    const vaultSalt = crypto.getRandomValues(new Uint8Array(16));
+    const vaultSaltB64 = b64(vaultSalt);
+
+    // 2) importe le mot de passe comme clé PBKDF2
+    const pwKey = await crypto.subtle.importKey(
+        "raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]
+    );
+
+    // 3) dérive 64 octets (512 bits)
+    const bits = await crypto.subtle.deriveBits(
+        { name: "PBKDF2", hash: "SHA-256", salt: vaultSalt, iterations },
+        pwKey,
+        512
+    );
+    const b = new Uint8Array(bits);
+
+    // 4) split : verifierPart (32 o) + encKeyMaterial (32 o)
+    const verifyPart = b.slice(0, 32);
+    const encKeyMaterial = b.slice(32, 64);
+
+    // 5) verifier = SHA-256(verifyPart)
+    const verifierHash = await crypto.subtle.digest("SHA-256", verifyPart);
+    const verifierB64 = b64(verifierHash);
+
+    // 6) encKeyMaterial pour usage en RAM (ex: dériver clé AES ou importer raw key)
+    const encKeyMaterialB64 = b64(encKeyMaterial);
+
+    return {
+        vaultSaltB64,
+        iterations,
+        verifierB64,
+        encKeyMaterialB64 // garder en mémoire, NE PAS stocker en DB
+    };
+}
+
+// Helper pour dériver la clé de chiffrement (à garder côté client)
+// deriveEncKeyFromEncKeyMaterial(encKeyMaterialB64)
+// convertit la matière première encKeyMaterial en clé AES utilisable (non exportable)
+export async function deriveEncKeyFromEncKeyMaterial(encKeyMaterialB64) {
+    const enc = new TextEncoder();
+    const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+    const material = b64d(encKeyMaterialB64);
+    // import as raw key material and mark as non-exportable AES-GCM key
+    return crypto.subtle.importKey("raw", material, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+// Calcule un verifier à partir d'un password + salt/iterations existants (pour "ouvrir" le vault)
+export async function computeVerifierFromPassword(password, vaultSaltB64, iterations = 600000) {
+    const enc = new TextEncoder();
+    const b64 = a => btoa(String.fromCharCode(...new Uint8Array(a)));
+    const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+    const pwKey = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+        { name: "PBKDF2", hash: "SHA-256", salt: b64d(vaultSaltB64), iterations },
+        pwKey,
+        512
+    );
+    const b = new Uint8Array(bits);
+    const verifyPart = b.slice(0, 32);
+    const encKeyMaterial = b.slice(32, 64); // utile ensuite pour la clé de chiffrement en RAM
+    const verifierHash = await crypto.subtle.digest("SHA-256", verifyPart);
+    return {
+        verifierB64: b64(verifierHash),
+        encKeyMaterialB64: b64(encKeyMaterial)
+    };
+}

@@ -17,7 +17,7 @@ public class CryptoInterop
 
     private async Task<IJSObjectReference> Mod()
     {
-        var url = new Uri(new Uri(_nav.BaseUri), "js/crypto.js").ToString();
+        var url = new Uri(new Uri(_nav.BaseUri), "js/crypto.js?v=8").ToString();
         return _mod ??= await _js.InvokeAsync<IJSObjectReference>("import", url);
     }
 
@@ -32,4 +32,10 @@ public class CryptoInterop
 
     public async Task<Dictionary<string,string>> DecryptEntrySeparateFieldsAsync(object record, string password)
         => await (await Mod()).InvokeAsync<Dictionary<string,string>>("decryptEntrySeparateFields", record, password);
+    
+    public async Task<object> CreateVaultVerifierAsync(string password, int iterations = 600_000)
+        => await (await Mod()).InvokeAsync<object>("createVaultVerifier", password, iterations);
+
+    public async Task<object> ComputeVerifierFromPasswordAsync(string password, string vaultSaltB64, int iterations = 600_000)
+        => await (await Mod()).InvokeAsync<object>("computeVerifierFromPassword", password, vaultSaltB64, iterations);
 }
