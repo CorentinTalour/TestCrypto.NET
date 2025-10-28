@@ -37,36 +37,39 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 // --- API "blind storage" ---
-app.MapPost("/api/secrets", async (SecretStore store, SecretRecordIn input, ILoggerFactory lf) =>
+app.MapPost("/api/secrets", async (SecretStore store, SecretRecordIn input) =>
 {
-    var log = lf.CreateLogger("Secrets");
-    try
-    {
-        var rec = new SecretRecord
-        {
-            CiphertextB64 = input.ciphertextB64,
-            IvB64 = input.ivB64,
-            SaltB64 = input.saltB64,
-            Iterations = input.iterations
-        };
-        await store.AddAsync(rec);
-        return Results.Ok(new { id = rec.Id });
-    }
-    catch (Exception ex)
-    {
-        log.LogError(ex, "Insert failed");
-        return Results.Problem(ex.Message, statusCode: 500);
-    }
+    var rec = new SecretRecord {
+        CipherPasswordB64 = input.cipherPasswordB64, IvPasswordB64 = input.ivPasswordB64,
+        CipherNameB64     = input.cipherNameB64,     IvNameB64     = input.ivNameB64,
+        CipherUrlB64      = input.cipherUrlB64,      IvUrlB64      = input.ivUrlB64,
+        CipherNotesB64    = input.cipherNotesB64,    IvNotesB64    = input.ivNotesB64,
+        SaltB64           = input.saltB64,           Iterations    = input.iterations
+    };
+    await store.AddAsync(rec);
+    return Results.Ok(new { id = rec.Id });
 }).DisableAntiforgery();
 
 app.MapGet("/api/secrets/{id:int}", async (SecretStore store, int id) =>
 {
-    var rec = await store.FindAsync(id);
-    return rec is null ? Results.NotFound()
-        : Results.Ok(new { rec.Id, rec.CiphertextB64, rec.IvB64, rec.SaltB64, rec.Iterations });
-}).DisableAntiforgery(); 
+    var r = await store.FindAsync(id);
+    return r is null ? Results.NotFound() :
+        Results.Ok(new {
+            r.Id,
+            r.CipherPasswordB64, r.IvPasswordB64,
+            r.CipherNameB64,     r.IvNameB64,
+            r.CipherUrlB64,      r.IvUrlB64,
+            r.CipherNotesB64,    r.IvNotesB64,
+            r.SaltB64,           r.Iterations
+        });
+}).DisableAntiforgery();
 
 app.Run();
 
 // --- RECORDS ---
-public record SecretRecordIn(string ciphertextB64, string ivB64, string saltB64, int iterations);
+public record SecretRecordIn(
+    string cipherPasswordB64, string ivPasswordB64,
+    string cipherNameB64,     string ivNameB64,
+    string cipherUrlB64,      string ivUrlB64,
+    string cipherNotesB64,    string ivNotesB64,
+    string saltB64, int iterations);

@@ -1,76 +1,131 @@
 @page "/crypto"
 @rendermode InteractiveServer
+@using System.Net.Http.Json
 @using TestCrytpoServer.Code
 @inject CryptoInterop CryptoJs
 @inject IHttpClientFactory HttpFactory
 @inject NavigationManager Nav
+@inject IJSRuntime JS
 
-<h3>Crypto client-side (PBKDF2 + AES-GCM)</h3>
+<h3>Vault — chiffrement côté client (PBKDF2 + AES-GCM)</h3>
 
-<input @bind="Password" type="password" placeholder="Mot de passe maître" />
-<textarea @bind="Plain" placeholder="Texte clair"></textarea>
-<button @onclick="EncryptAndSave">Chiffrer & Enregistrer</button>
+<!-- Mot de passe maître (lu uniquement côté JS) -->
+<div style="margin-bottom:1rem;">
+  <label for="mp">Mot de passe maître</label><br />
+  <input id="mp" type="password" autocomplete="new-password" placeholder="••••••••" />
+  <small style="display:block;color:#666;">(Jamais envoyé au serveur)</small>
+</div>
 
-<input @bind="RecordId" placeholder="Id à déchiffrer" />
-<button @onclick="LoadAndDecrypt">Charger & Déchiffrer</button>
+<!-- Champs de l'entrée à chiffrer -->
+<fieldset style="margin-bottom:1rem;">
+  <legend>Nouvelle entrée</legend>
 
-<p>@Decrypted</p>
+  <div style="margin-bottom:.5rem;">
+    <label for="name">Nom d’utilisateur</label><br />
+    <input id="name" placeholder="ex: alice" />
+  </div>
+
+  <div style="margin-bottom:.5rem;">
+    <label for="pwd">Mot de passe</label><br />
+    <input id="pwd" type="text" placeholder="ex: p@55w0rd!" />
+  </div>
+
+  <div style="margin-bottom:.5rem;">
+    <label for="url">URL</label><br />
+    <input id="url" type="url" placeholder="https://exemple.com" />
+  </div>
+
+  <div style="margin-bottom:.5rem;">
+    <label for="notes">Notes</label><br />
+    <textarea id="notes" rows="3" placeholder="Infos complémentaires…"></textarea>
+  </div>
+
+  <button @onclick="EncryptAndSaveSeparate">Chiffrer & Enregistrer</button>
+</fieldset>
+
+<!-- Déchiffrement d'une entrée existante -->
+<fieldset style="margin-bottom:1rem;">
+  <legend>Charger & déchiffrer</legend>
+  <div style="margin-bottom:.5rem;">
+    <label for="rid">Id de l’entrée</label><br />
+    <input id="rid" type="number" @bind="RecordId" />
+  </div>
+  <button @onclick="LoadAndDecrypt">Charger & Déchiffrer</button>
+</fieldset>
+
+<!-- Résultat du déchiffrement -->
+@if (HasDecrypted)
+{
+  <div style="border:1px solid #ddd;padding:1rem;border-radius:.5rem;margin-bottom:1rem;">
+    <h4>Entrée déchiffrée</h4>
+    <div><strong>Nom d’utilisateur :</strong> @DecName</div>
+    <div><strong>Mot de passe :</strong> @DecPassword</div>
+    <div><strong>URL :</strong> @DecUrl</div>
+    <div><strong>Notes :</strong><br /> @DecNotes</div>
+  </div>
+}
 
 <p><em>@Status</em></p>
 
 @code {
-    string Password = "";
-    string Plain = "";
-    string Decrypted = "";
+    // État UI
     int RecordId;
-    string Status = "";   // petit panneau de statut
+    string Status = "";
+    bool HasDecrypted = false;
+    string DecName = "", DecPassword = "", DecUrl = "", DecNotes = "";
 
-    async Task EncryptAndSave()
+    // Chiffre les 4 champs saisis + envoie à l'API (schéma "champs séparés")
+    async Task EncryptAndSaveSeparate()
     {
         try
         {
             Status = "Chiffrement en cours…";
-            var res = await CryptoJs.EncryptAsync(Plain, Password);
-            var payload = new {
-                ciphertextB64 = res.ciphertextB64,
-                ivB64 = res.ivB64,
-                saltB64 = res.saltB64,
-                iterations = res.iterations
-            };
+            // Récupère le MP côté navigateur uniquement
+            var master = await JS.InvokeAsync<string>("eval", "document.getElementById('mp')?.value || ''");
+            if (string.IsNullOrEmpty(master)) { Status = "Veuillez saisir le mot de passe maître."; return; }
+
+            // Payload = { cipherPasswordB64, ivPasswordB64, ... , saltB64, iterations }
+            var payload = await CryptoJs.EncryptEntrySeparateFieldsAsync(master);
 
             var http = HttpFactory.CreateClient();
             var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/secrets", payload);
             Status = $"POST /api/secrets → {(int)resp.StatusCode}";
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                Decrypted = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}";
-                return;
-            }
         }
         catch (Exception ex)
         {
-            Decrypted = "ERR EncryptAndSave: " + ex.Message;
+            Status = "ERR EncryptAndSaveSeparate: " + ex.Message;
         }
     }
 
+    // Charge l'enregistrement et déchiffre côté client
     async Task LoadAndDecrypt()
     {
         try
         {
+            HasDecrypted = false;
             Status = "Chargement…";
-            var http = HttpFactory.CreateClient();
-            var rec = await http.GetFromJsonAsync<SecretDto>($"{Nav.BaseUri}api/secrets/{RecordId}");
-            if (rec is null) { Decrypted = "Introuvable"; return; }
 
-            Decrypted = await CryptoJs.DecryptAsync(rec.ciphertextB64, Password, rec.ivB64, rec.saltB64, rec.iterations);
+            var http = HttpFactory.CreateClient();
+            var recObj = await http.GetFromJsonAsync<object>($"{Nav.BaseUri}api/secrets/{RecordId}");
+            if (recObj is null) { Status = "Introuvable"; return; }
+
+            var master = await JS.InvokeAsync<string>("eval", "document.getElementById('mp')?.value || ''");
+            if (string.IsNullOrEmpty(master)) { Status = "Veuillez saisir le mot de passe maître."; return; }
+
+            var entry = await CryptoJs.DecryptEntrySeparateFieldsAsync(recObj!, master);
+
+            // entry = Dictionary<string,string> => name/password/url/notes
+            DecName = entry["name"];
+            DecPassword = entry["password"];
+            DecUrl = entry["url"];
+            DecNotes = entry["notes"];
+            HasDecrypted = true;
+
             Status = "OK";
         }
         catch (Exception ex)
         {
-            Decrypted = "ERR LoadAndDecrypt: " + ex.Message;
+            Status = "ERR LoadAndDecrypt: " + ex.Message;
         }
     }
-
-    public record SecretDto(int id, string ciphertextB64, string ivB64, string saltB64, int iterations);
 }

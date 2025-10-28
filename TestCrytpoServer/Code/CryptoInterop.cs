@@ -26,4 +26,10 @@ public class CryptoInterop
         => await (await Mod()).InvokeAsync<EncryptResult>("encryptPBKDF2_GCM", plaintext, password, iterations);
     public async Task<string> DecryptAsync(string ciphertextB64, string password, string ivB64, string saltB64, int iterations)
         => await (await Mod()).InvokeAsync<string>("decryptPBKDF2_GCM", ciphertextB64, password, ivB64, saltB64, iterations);
+    
+    public async Task<object> EncryptEntrySeparateFieldsAsync(string password)
+        => await (await Mod()).InvokeAsync<object>("encryptEntrySeparateFields", password);
+
+    public async Task<Dictionary<string,string>> DecryptEntrySeparateFieldsAsync(object record, string password)
+        => await (await Mod()).InvokeAsync<Dictionary<string,string>>("decryptEntrySeparateFields", record, password);
 }

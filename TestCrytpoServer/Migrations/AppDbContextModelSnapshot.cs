@@ -29,14 +29,38 @@ namespace TestCrytpoServer.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("CiphertextB64")
+                    b.Property<string>("CipherNameB64")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("CipherNotesB64")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("CipherPasswordB64")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("CipherUrlB64")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<int>("Iterations")
                         .HasColumnType("int");
 
-                    b.Property<string>("IvB64")
+                    b.Property<string>("IvNameB64")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("IvNotesB64")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("IvPasswordB64")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("IvUrlB64")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
