@@ -8,4 +8,6 @@ public class Vault
     public int Iterations { get; set; }
     public string VerifierB64 { get; set; } = ""; // valeur stockée pour vérifier le MP
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    
+    public List<SecretRecord> Secrets { get; set; } = new();
 }

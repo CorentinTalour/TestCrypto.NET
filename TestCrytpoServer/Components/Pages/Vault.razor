@@ -4,112 +4,224 @@
 @using System.Text.Json
 @inject IHttpClientFactory HttpFactory
 @inject NavigationManager Nav
-@inject IJSRuntime JS
 @inject TestCrytpoServer.Code.CryptoInterop CryptoJs
 
-<h3>Gestion du Vault</h3>
+<h3>Mon Vault</h3>
 
-<fieldset style="margin-bottom:1.5rem;">
-  <legend>Créer un vault</legend>
-  <div style="margin-bottom:.5rem;">
-    <label for="owner">OwnerUserId</label><br />
-    <input id="owner" placeholder="ex: user-123" />
-  </div>
-  <div style="margin-bottom:.5rem;">
-    <label for="mpCreate">Mot de passe maître</label><br />
-    <input id="mpCreate" type="password" autocomplete="new-password" placeholder="••••••••" />
-  </div>
-  <button @onclick="CreateVault">Créer le vault</button>
-  <div><em>@CreateStatus</em></div>
-</fieldset>
+@if (!IsOpen)
+{
+  <fieldset style="margin-bottom:1.25rem;">
+    <legend>Créer un nouveau vault</legend>
+    <div style="margin-bottom:.5rem;">
+      <label>OwnerUserId</label><br />
+      <input @bind="OwnerUserId" placeholder="ex: user-123" />
+    </div>
+    <div style="margin-bottom:.5rem;">
+      <label>Mot de passe maître</label><br />
+      <input type="password" @bind="MasterToCreate" placeholder="••••••••" />
+    </div>
+    <button @onclick="CreateAndOpenVault">Créer & Ouvrir</button>
+  </fieldset>
 
-<fieldset style="margin-bottom:1.5rem;">
-  <legend>Accéder au vault (vérifier le mot de passe)</legend>
-  <div style="margin-bottom:.5rem;">
-    <label for="vid">Vault Id</label><br />
-    <input id="vid" type="number" @bind="VaultId" />
+  <fieldset style="margin-bottom:1rem;">
+    <legend>Ouvrir un vault existant</legend>
+    <div style="margin-bottom:.5rem;">
+      <label>Vault Id</label><br />
+      <input type="number" @bind="VaultId" />
+    </div>
+    <div style="margin-bottom:.5rem;">
+      <label>Mot de passe maître</label><br />
+      <input type="password" @bind="MasterToOpen" placeholder="••••••••" />
+    </div>
+    <button @onclick="OpenVault">Ouvrir</button>
+  </fieldset>
+
+  <div><em>@Status</em></div>
+}
+else
+{
+  <div style="margin:.5rem 0 1rem;">
+    <strong>Vault @VaultId ouvert.</strong>
+    <button style="margin-left:1rem" @onclick="CloseVault">Fermer</button>
   </div>
-  <div style="margin-bottom:.5rem;">
-    <label for="mpOpen">Mot de passe maître</label><br />
-    <input id="mpOpen" type="password" autocomplete="current-password" placeholder="••••••••" />
-  </div>
-  <button @onclick="CheckVault">Vérifier le mot de passe</button>
-  <div><em>@CheckStatus</em></div>
-</fieldset>
+
+  <fieldset style="margin-bottom:1rem;">
+    <legend>Ajouter une entrée</legend>
+    <div style="margin-bottom:.5rem;">
+      <label>Nom d’utilisateur</label><br />
+      <input id="name" @bind="NewName" />
+    </div>
+    <div style="margin-bottom:.5rem;">
+      <label>Mot de passe</label><br />
+      <input id="pwd" @bind="NewPassword" />
+    </div>
+    <div style="margin-bottom:.5rem;">
+      <label>URL</label><br />
+      <input id="url" @bind="NewUrl" />
+    </div>
+    <div style="margin-bottom:.5rem;">
+      <label>Notes</label><br />
+      <textarea id="notes" rows="3" @bind="NewNotes"></textarea>
+    </div>
+    <button @onclick="AddEntry">Chiffrer & Enregistrer</button>
+  </fieldset>
+
+  <h4>Entrées du vault (déchiffrées côté client)</h4>
+  @if (DecryptedEntries.Count == 0)
+  {
+    <p>Aucune entrée.</p>
+  }
+  else
+  {
+    <ul>
+      @foreach (var e in DecryptedEntries)
+      {
+        <li style="margin-bottom:.75rem;">
+          <div><strong>@e.Name</strong></div>
+          <div>Mot de passe : @e.Password</div>
+          <div>URL : @e.Url</div>
+          <div>Notes : @e.Notes</div>
+        </li>
+      }
+    </ul>
+  }
+
+  <div><em>@Status</em></div>
+}
 
 @code {
-    int VaultId;
-    string CreateStatus = "";
-    string CheckStatus = "";
+  // Etat
+  int VaultId;
+  bool IsOpen = false;
+  string Status = "";
 
-    async Task CreateVault()
-    {
-        try
-        {
-            CreateStatus = "Création en cours…";
+  // Création/ouverture
+  string OwnerUserId = "";
+  string MasterToCreate = "";
+  string MasterToOpen = "";
 
-            var owner = await JS.InvokeAsync<string>("eval", "document.getElementById('owner')?.value || ''");
-            var mp    = await JS.InvokeAsync<string>("eval", "document.getElementById('mpCreate')?.value || ''");
-            if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(mp))
-            {
-                CreateStatus = "Owner et MP requis.";
-                return;
-            }
+  // Saisie nouvelle entrée
+  string NewName = "", NewPassword = "", NewUrl = "", NewNotes = "";
 
-            // JS module -> object brut
-            var resObj = await CryptoJs.CreateVaultVerifierAsync(mp, 600_000);
-            var res = (JsonElement)resObj; // { vaultSaltB64, iterations, verifierB64, encKeyMaterialB64 }
+  // Liste déchiffrée
+  List<EntryVm> DecryptedEntries = new();
+  record EntryVm(int Id, string Name, string Password, string Url, string Notes);
 
-            string vaultSaltB64 = res.GetProperty("vaultSaltB64").GetString()!;
-            int iterations = res.GetProperty("iterations").GetInt32();
-            string verifierB64 = res.GetProperty("verifierB64").GetString()!;
-            // encKeyMaterialB64 = res.GetProperty("encKeyMaterialB64").GetString(); // (optionnel, à garder côté client)
+  // --- Actions ---
 
-            var http = HttpFactory.CreateClient();
-            var payload = new { ownerUserId = owner, vaultSaltB64, iterations, verifierB64 };
-            var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/vaults", payload);
+  async Task CreateAndOpenVault()
+  {
+      try
+      {
+          Status = "Création du vault…";
+          if (string.IsNullOrWhiteSpace(OwnerUserId) || string.IsNullOrWhiteSpace(MasterToCreate))
+          { Status = "OwnerUserId et MP requis."; return; }
 
-            if (!resp.IsSuccessStatusCode) { CreateStatus = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}"; return; }
+          // 1) Générer côté client : vaultSaltB64/verifierB64
+          var genObj = await CryptoJs.CreateVaultVerifierAsync(MasterToCreate, 600_000);
+          var gen = (JsonElement)genObj;
+          string vaultSaltB64 = gen.GetProperty("vaultSaltB64").GetString()!;
+          int iterations      = gen.GetProperty("iterations").GetInt32();
+          string verifierB64  = gen.GetProperty("verifierB64").GetString()!;
 
-            var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-            VaultId = body.GetProperty("id").GetInt32();
-            CreateStatus = $"Vault créé (Id={VaultId}).";
-        }
-        catch (Exception ex) { CreateStatus = "ERR CreateVault: " + ex.Message; }
-    }
+          // 2) Créer le vault côté serveur
+          var http = HttpFactory.CreateClient();
+          var payload = new { ownerUserId = OwnerUserId, vaultSaltB64, iterations, verifierB64 };
+          var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/vaults", payload);
+          if (!resp.IsSuccessStatusCode)
+          { Status = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}"; return; }
 
-    async Task CheckVault()
-    {
-        try
-        {
-            CheckStatus = "Vérification…";
+          var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+          VaultId = body.GetProperty("id").GetInt32();
 
-            var mp = await JS.InvokeAsync<string>("eval", "document.getElementById('mpOpen')?.value || ''");
-            if (VaultId <= 0 || string.IsNullOrWhiteSpace(mp))
-            {
-                CheckStatus = "VaultId et MP requis."; return;
-            }
+          // 3) Ouvrir immédiatement
+          MasterToOpen = MasterToCreate;
+          await OpenVault();
+      }
+      catch (Exception ex) { Status = "ERR CreateAndOpenVault: " + ex.Message; }
+  }
 
-            var http = HttpFactory.CreateClient();
+  async Task OpenVault()
+  {
+      try
+      {
+          Status = "Ouverture…";
+          if (VaultId <= 0 || string.IsNullOrWhiteSpace(MasterToOpen))
+          { Status = "VaultId et MP requis."; return; }
 
-            var prms = await http.GetFromJsonAsync<JsonElement>($"{Nav.BaseUri}api/vaults/{VaultId}/params");
-            string vaultSaltB64 = prms.GetProperty("vaultSaltB64").GetString()!;
-            int iterations = prms.GetProperty("iterations").GetInt32();
+          // 1) ouvre côté JS (vérifie MP -> importe la clé AES en RAM)
+          var res = (JsonElement)await CryptoJs.OpenVaultAsync(VaultId, MasterToOpen);
+          if (!res.TryGetProperty("ok", out var okProp) || !okProp.GetBoolean())
+          {
+              Status = res.TryGetProperty("error", out var e) ? e.GetString() ?? "Erreur" : "Erreur";
+              return;
+          }
 
-            var candObj = await CryptoJs.ComputeVerifierFromPasswordAsync(mp, vaultSaltB64, iterations);
-            var cand = (JsonElement)candObj; // { verifierB64, encKeyMaterialB64 }
-            string verifierB64 = cand.GetProperty("verifierB64").GetString()!;
+          IsOpen = true;
+          Status = "Vault ouvert. Chargement des entrées…";
 
-            var payload = new { verifierB64 };
-            var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/vaults/{VaultId}/check", payload);
-            if (!resp.IsSuccessStatusCode) { CheckStatus = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}"; return; }
+          // 2) charge & déchiffre
+          await ReloadEntries();
+      }
+      catch (Exception ex) { Status = "ERR OpenVault: " + ex.Message; }
+  }
 
-            var okObj = await resp.Content.ReadFromJsonAsync<JsonElement>();
-            bool ok = okObj.GetProperty("ok").GetBoolean();
+  async Task ReloadEntries()
+  {
+      try
+      {
+          var http = HttpFactory.CreateClient();
+          var records = await http.GetFromJsonAsync<JsonElement[]>($"{Nav.BaseUri}api/vaults/{VaultId}/entries");
+          DecryptedEntries.Clear();
 
-            CheckStatus = ok ? "Mot de passe correct — vault accessible."
-                             : "Mot de passe incorrect.";
-        }
-        catch (Exception ex) { CheckStatus = "ERR CheckVault: " + ex.Message; }
-    }
+          if (records is null || records.Length == 0) { Status = "Aucune entrée."; StateHasChanged(); return; }
+
+          foreach (var rec in records)
+          {
+              var dec = await CryptoJs.DecryptVaultEntryAsync(rec);
+              DecryptedEntries.Add(new EntryVm(
+                  Id: rec.TryGetProperty("id", out var idProp) ? idProp.GetInt32() : 0,
+                  Name: dec["name"],
+                  Password: dec["password"],
+                  Url: dec["url"],
+                  Notes: dec["notes"]
+              ));
+          }
+
+          Status = $"Chargé : {DecryptedEntries.Count} entrée(s).";
+      }
+      catch (Exception ex) { Status = "ERR ReloadEntries: " + ex.Message; }
+      StateHasChanged();
+  }
+
+  async Task AddEntry()
+  {
+      try
+      {
+          if (!IsOpen) { Status = "Ouvre d'abord le vault."; return; }
+
+          // 1) chiffrer dans le navigateur avec la clé du vault
+          var payload = await CryptoJs.EncryptEntryForOpenVaultAsync();
+
+          // 2) envoyer au serveur
+          var http = HttpFactory.CreateClient();
+          var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/vaults/{VaultId}/entries", payload);
+          if (!resp.IsSuccessStatusCode)
+          { Status = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}"; return; }
+
+          // 3) rafraîchir
+          await ReloadEntries();
+
+          // 4) reset des champs
+          NewName = NewPassword = NewUrl = NewNotes = "";
+      }
+      catch (Exception ex) { Status = "ERR AddEntry: " + ex.Message; }
+  }
+
+  void CloseVault()
+  {
+      IsOpen = false;
+      DecryptedEntries.Clear();
+      Status = "Vault fermé.";
+  }
 }

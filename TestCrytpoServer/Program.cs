@@ -38,20 +38,20 @@ app.MapRazorComponents<App>()
 // ----------------------------------------------------------------------
 // --- API "blind storage" pour secrets (inchangée)
 // ----------------------------------------------------------------------
-app.MapPost("/api/secrets", async (SecretStore store, SecretRecordIn input) =>
-{
-    var rec = new SecretRecord
-    {
-        CipherPasswordB64 = input.cipherPasswordB64, TagPasswordB64 = input.tagPasswordB64,
-        IvPasswordB64 = input.ivPasswordB64,
-        CipherNameB64 = input.cipherNameB64, TagNameB64 = input.tagNameB64, IvNameB64 = input.ivNameB64,
-        CipherUrlB64 = input.cipherUrlB64, TagUrlB64 = input.tagUrlB64, IvUrlB64 = input.ivUrlB64,
-        CipherNotesB64 = input.cipherNotesB64, TagNotesB64 = input.tagNotesB64, IvNotesB64 = input.ivNotesB64,
-        SaltB64 = input.saltB64, Iterations = input.iterations
-    };
-    await store.AddAsync(rec);
-    return Results.Ok(new { id = rec.Id });
-}).DisableAntiforgery();
+// app.MapPost("/api/secrets", async (SecretStore store, SecretRecordIn input) =>
+// {
+//     var rec = new SecretRecord
+//     {
+//         CipherPasswordB64 = input.cipherPasswordB64, TagPasswordB64 = input.tagPasswordB64,
+//         IvPasswordB64 = input.ivPasswordB64,
+//         CipherNameB64 = input.cipherNameB64, TagNameB64 = input.tagNameB64, IvNameB64 = input.ivNameB64,
+//         CipherUrlB64 = input.cipherUrlB64, TagUrlB64 = input.tagUrlB64, IvUrlB64 = input.ivUrlB64,
+//         CipherNotesB64 = input.cipherNotesB64, TagNotesB64 = input.tagNotesB64, IvNotesB64 = input.ivNotesB64,
+//         SaltB64 = input.saltB64, Iterations = input.iterations
+//     };
+//     await store.AddAsync(rec);
+//     return Results.Ok(new { id = rec.Id });
+// }).DisableAntiforgery();
 
 // app.MapPost("/api/secrets", async (HttpRequest req) =>
 // {
@@ -71,7 +71,6 @@ app.MapGet("/api/secrets/{id:int}", async (SecretStore store, int id) =>
             r.CipherNameB64,     r.TagNameB64,     r.IvNameB64,
             r.CipherUrlB64,      r.TagUrlB64,      r.IvUrlB64,
             r.CipherNotesB64,    r.TagNotesB64,    r.IvNotesB64,
-            r.SaltB64,           r.Iterations
         });
 }).DisableAntiforgery();
 
@@ -129,6 +128,37 @@ app.MapPost("/api/vaults/{vaultId:int}/check", async (AppDbContext db, int vault
     return Results.Ok(new { ok });
 }).DisableAntiforgery();
 
+// Créer une entrée dans un vault
+app.MapPost("/api/vaults/{vaultId:int}/entries", async (AppDbContext db, int vaultId, VaultEntryIn input) =>
+{
+    var rec = new SecretRecord
+    {
+        VaultId = vaultId,
+        CipherPasswordB64 = input.cipherPasswordB64, TagPasswordB64 = input.tagPasswordB64, IvPasswordB64 = input.ivPasswordB64,
+        CipherNameB64     = input.cipherNameB64,     TagNameB64     = input.tagNameB64,     IvNameB64     = input.ivNameB64,
+        CipherUrlB64      = input.cipherUrlB64,      TagUrlB64      = input.tagUrlB64,      IvUrlB64      = input.ivUrlB64,
+        CipherNotesB64    = input.cipherNotesB64,    TagNotesB64    = input.tagNotesB64,    IvNotesB64    = input.ivNotesB64,
+    };
+    db.Secrets.Add(rec);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/vaults/{vaultId}/entries/{rec.Id}", new { id = rec.Id });
+}).DisableAntiforgery();
+
+// Lister les entrées d’un vault (toujours chiffrées)
+app.MapGet("/api/vaults/{vaultId:int}/entries", async (AppDbContext db, int vaultId) =>
+{
+    var list = await db.Secrets.Where(s => s.VaultId == vaultId)
+        .Select(s => new {
+            id = s.Id,
+            s.CipherPasswordB64, s.TagPasswordB64, s.IvPasswordB64,
+            s.CipherNameB64,     s.TagNameB64,     s.IvNameB64,
+            s.CipherUrlB64,      s.TagUrlB64,      s.IvUrlB64,
+            s.CipherNotesB64,    s.TagNotesB64,    s.IvNotesB64
+        })
+        .ToListAsync();
+    return Results.Ok(list);
+}).DisableAntiforgery();
+
 app.Run();
 
 // --- RECORDS POUR SECRETS UNIQUEMENT ---
@@ -138,3 +168,9 @@ public record SecretRecordIn(
     string cipherUrlB64,      string tagUrlB64,      string ivUrlB64,
     string cipherNotesB64,    string tagNotesB64,    string ivNotesB64,
     string saltB64, int iterations);
+    
+public record VaultEntryIn(
+    string cipherPasswordB64, string tagPasswordB64, string ivPasswordB64,
+    string cipherNameB64,     string tagNameB64,     string ivNameB64,
+    string cipherUrlB64,      string tagUrlB64,      string ivUrlB64,
+    string cipherNotesB64,    string tagNotesB64,    string ivNotesB64);

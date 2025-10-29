@@ -3,6 +3,9 @@ namespace TestCrytpoServer.EF;
 public class SecretRecord
 {
     public int Id { get; set; }
+    public int VaultId { get; set; }
+
+    public Vault? Vault { get; set; }
 
     public string CipherPasswordB64 { get; set; } = "";
     public string TagPasswordB64 { get; set; } = "";
@@ -19,7 +22,4 @@ public class SecretRecord
     public string CipherNotesB64 { get; set; } = "";
     public string TagNotesB64 { get; set; } = "";
     public string IvNotesB64 { get; set; } = "";
-
-    public string SaltB64 { get; set; } = "";
-    public int Iterations { get; set; }
 }

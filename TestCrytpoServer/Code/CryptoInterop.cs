@@ -38,4 +38,13 @@ public class CryptoInterop
 
     public async Task<object> ComputeVerifierFromPasswordAsync(string password, string vaultSaltB64, int iterations = 600_000)
         => await (await Mod()).InvokeAsync<object>("computeVerifierFromPassword", password, vaultSaltB64, iterations);
+    
+    public async Task<object> OpenVaultAsync(int vaultId, string password)
+        => await (await Mod()).InvokeAsync<object>("openVault", vaultId, password);
+
+    public async Task<object> EncryptEntryForOpenVaultAsync()
+        => await (await Mod()).InvokeAsync<object>("encryptEntryForOpenVault");
+
+    public async Task<Dictionary<string,string>> DecryptVaultEntryAsync(object record)
+        => await (await Mod()).InvokeAsync<Dictionary<string,string>>("decryptVaultEntry", record);
 }

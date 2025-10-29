@@ -234,3 +234,100 @@ export async function computeVerifierFromPassword(password, vaultSaltB64, iterat
         encKeyMaterialB64: b64(encKeyMaterial)
     };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// --- état courant du coffre ouvert (clé AES en RAM) ---
+let currentVault = {
+    id: null,
+    key: null // CryptoKey AES-GCM non exportable
+};
+
+// Ouvrir un coffre : vérifie le password et importe la clé AES utilisée pour TOUTES les entrées
+export async function openVault(vaultId, password) {
+    // 1) params
+    const p = await (await fetch(`/api/vaults/${vaultId}/params`)).json(); // { vaultSaltB64, iterations }
+
+    // 2) dérive verifier + encKeyMaterialB64
+    const { verifierB64, encKeyMaterialB64 } =
+        await computeVerifierFromPassword(password, p.vaultSaltB64, p.iterations);
+
+    // 3) check serveur
+    const check = await (await fetch(`/api/vaults/${vaultId}/check`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verifierB64 })
+    })).json();
+    if (!check.ok) return { ok: false, error: "Mot de passe maître invalide." };
+
+    // 4) importe la clé AES utilisable (non exportable), en RAM seulement
+    const key = await deriveEncKeyFromEncKeyMaterial(encKeyMaterialB64);
+    currentVault = { id: vaultId, key };
+    return { ok: true };
+}
+
+// utilitaire : chiffre un champ avec la clé du coffre
+async function encFieldWithVaultKey(text, aad) {
+    if (!currentVault.key) throw new Error("Vault non ouvert");
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ctFull = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv, additionalData: aad ? enc.encode(aad) : undefined },
+        currentVault.key,
+        enc.encode(text ?? "")
+    );
+    const { cipher, tag } = splitCtAndTag(ctFull);
+    return { cipher, tag, iv };
+}
+
+// utilitaire : déchiffre un champ avec la clé du coffre (inputs en Uint8Array)
+async function decFieldWithVaultKey(cipherU8, tagU8, ivU8, aad) {
+    if (!currentVault.key) throw new Error("Vault non ouvert");
+    const full = joinCtAndTag(cipherU8, tagU8);
+    const pt = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: ivU8, additionalData: aad ? enc.encode(aad) : undefined },
+        currentVault.key,
+        full
+    );
+    return new TextDecoder().decode(pt);
+}
+
+// Chiffrer une nouvelle entrée pour le coffre ouvert (renvoie Base64 pour JSON)
+export async function encryptEntryForOpenVault() {
+    if (!currentVault.key) throw new Error("Vault non ouvert");
+    const get = id => document.getElementById(id)?.value ?? "";
+    const name = get("name"), pwd = get("pwd"), url = get("url"), notes = get("notes");
+
+    const p  = await encFieldWithVaultKey(pwd,   "field:password");
+    const n  = await encFieldWithVaultKey(name,  "field:name");
+    const u  = await encFieldWithVaultKey(url,   "field:url");
+    const no = await encFieldWithVaultKey(notes, "field:notes");
+
+    // transport en Base64 (JSON friendly)
+    return {
+        cipherPasswordB64: b64(p.cipher), tagPasswordB64: b64(p.tag), ivPasswordB64: b64(p.iv),
+        cipherNameB64:     b64(n.cipher), tagNameB64:     b64(n.tag), ivNameB64:     b64(n.iv),
+        cipherUrlB64:      b64(u.cipher), tagUrlB64:      b64(u.tag), ivUrlB64:      b64(u.iv),
+        cipherNotesB64:    b64(no.cipher),tagNotesB64:    b64(no.tag),ivNotesB64:    b64(no.iv)
+        // NOTE: pas de salt/iterations par entrée
+    };
+}
+
+// Déchiffrer une entrée du coffre (record JSON Base64 -> objet clair)
+export async function decryptVaultEntry(record) {
+    const out = {};
+    out.password = await decFieldWithVaultKey(b64d(record.cipherPasswordB64), b64d(record.tagPasswordB64), b64d(record.ivPasswordB64), "field:password");
+    out.name     = await decFieldWithVaultKey(b64d(record.cipherNameB64),     b64d(record.tagNameB64),     b64d(record.ivNameB64),     "field:name");
+    out.url      = await decFieldWithVaultKey(b64d(record.cipherUrlB64),      b64d(record.tagUrlB64),      b64d(record.ivUrlB64),      "field:url");
+    out.notes    = await decFieldWithVaultKey(b64d(record.cipherNotesB64),    b64d(record.tagNotesB64),    b64d(record.ivNotesB64),    "field:notes");
+    return out;
+}
