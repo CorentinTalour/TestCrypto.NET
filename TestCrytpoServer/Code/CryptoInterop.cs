@@ -17,34 +17,35 @@ public class CryptoInterop
 
     private async Task<IJSObjectReference> Mod()
     {
-        var url = new Uri(new Uri(_nav.BaseUri), "js/crypto.js?v=9").ToString();
+        // bump version si tu touches crypto.js
+        var url = new Uri(new Uri(_nav.BaseUri), "js/crypto.js?v=10").ToString();
         return _mod ??= await _js.InvokeAsync<IJSObjectReference>("import", url);
     }
 
-    public record EncryptResult(string ciphertextB64, string ivB64, string saltB64, int iterations);
-    public async Task<EncryptResult> EncryptAsync(string plaintext, string password, int iterations = 600_000)
-        => await (await Mod()).InvokeAsync<EncryptResult>("encryptPBKDF2_GCM", plaintext, password, iterations);
-    public async Task<string> DecryptAsync(string ciphertextB64, string password, string ivB64, string saltB64, int iterations)
-        => await (await Mod()).InvokeAsync<string>("decryptPBKDF2_GCM", ciphertextB64, password, ivB64, saltB64, iterations);
-    
-    public async Task<object> EncryptEntrySeparateFieldsAsync(string password)
-        => await (await Mod()).InvokeAsync<object>("encryptEntrySeparateFields", password);
+    // --- SAFE: le MP reste dans le navigateur ---
 
-    public async Task<Dictionary<string,string>> DecryptEntrySeparateFieldsAsync(object record, string password)
-        => await (await Mod()).InvokeAsync<Dictionary<string,string>>("decryptEntrySeparateFields", record, password);
+    // Crée salt/verifier/iterations à partir de #input côté client (MP pas renvoyé)
+    public async Task<object> CreateVaultVerifierFromInputAsync(string inputId, int iterations = 600_000)
+        => await (await Mod()).InvokeAsync<object>("createVaultVerifierFromInput", inputId, iterations);
+
+    // Ouvre le vault en lisant le MP depuis #input côté client (MP pas renvoyé)
+    public async Task<object> OpenVaultFromInputAsync(int vaultId, string inputId)
+        => await (await Mod()).InvokeAsync<object>("openVaultFromInput", vaultId, inputId);
+
+    // Chiffre une nouvelle entrée avec la clé du vault en RAM (client)
+    public async Task<object> EncryptEntryForOpenVaultAsync()
+        => await (await Mod()).InvokeAsync<object>("encryptEntryForOpenVault");
+
+    // Déchiffre une entrée (client) et affiche dans le DOM
+    public async Task RenderVaultEntriesAsync(object records)
+        => await (await Mod()).InvokeVoidAsync("renderVaultEntries", records);
+
+    public async Task ClearVaultListAsync()
+        => await (await Mod()).InvokeVoidAsync("clearVaultList");
     
     public async Task<object> CreateVaultVerifierAsync(string password, int iterations = 600_000)
         => await (await Mod()).InvokeAsync<object>("createVaultVerifier", password, iterations);
 
-    public async Task<object> ComputeVerifierFromPasswordAsync(string password, string vaultSaltB64, int iterations = 600_000)
-        => await (await Mod()).InvokeAsync<object>("computeVerifierFromPassword", password, vaultSaltB64, iterations);
-    
     public async Task<object> OpenVaultAsync(int vaultId, string password)
         => await (await Mod()).InvokeAsync<object>("openVault", vaultId, password);
-
-    public async Task<object> EncryptEntryForOpenVaultAsync()
-        => await (await Mod()).InvokeAsync<object>("encryptEntryForOpenVault");
-
-    public async Task<Dictionary<string,string>> DecryptVaultEntryAsync(object record)
-        => await (await Mod()).InvokeAsync<Dictionary<string,string>>("decryptVaultEntry", record);
 }
