@@ -9,6 +9,25 @@ const b64 = a => btoa(String.fromCharCode(...new Uint8Array(a)));
 // Conversion d’une chaîne Base64 vers Uint8Array (pour déchiffrement)
 const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
+// Taille tag AES-GCM (octets). 128 bits par défaut.
+const TAG_BYTES = 16;
+
+// Split [cipher||tag] -> {cipher, tag}
+function splitCtAndTag(buf) {
+    const u = new Uint8Array(buf);
+    const cipher = u.slice(0, u.length - TAG_BYTES);
+    const tag = u.slice(u.length - TAG_BYTES);
+    return { cipher, tag };
+}
+
+// Join cipher + tag -> ArrayBuffer
+function joinCtAndTag(cipherU8, tagU8) {
+    const out = new Uint8Array(cipherU8.length + tagU8.length);
+    out.set(cipherU8, 0);
+    out.set(tagU8, cipherU8.length);
+    return out.buffer;
+}
+
 
 // --- FONCTION DE DÉRIVATION DE CLÉ (PBKDF2) ---
 
@@ -49,21 +68,16 @@ async function deriveKeyPBKDF2(password, saltB64, iterations) {
 // - text : texte à chiffrer
 // - aad : (facultatif) "Associated Authenticated Data" — ici le type du champ
 async function encField(key, text, aad) {
-    // Génère un IV aléatoire de 12 octets (taille recommandée pour GCM)
     const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    // Chiffre le texte clair avec AES-GCM
-    // -> additionalData (AAD) permet d’associer des métadonnées (ex : “field:name”)
-    const ct = await crypto.subtle.encrypt(
+    const ctFull = await crypto.subtle.encrypt(
         { name: "AES-GCM", iv, additionalData: aad ? enc.encode(aad) : undefined },
         key,
         enc.encode(text ?? "")
     );
 
-    // Retourne le ciphertext et l’IV en Base64
-    return { cipherB64: b64(ct), ivB64: b64(iv) };
+    const { cipher, tag } = splitCtAndTag(ctFull);
+    return { cipherB64: b64(cipher), tagB64: b64(tag), ivB64: b64(iv) };
 }
-
 
 // --- CHIFFREMENT DE TOUS LES CHAMPS DE L’ENTRÉE ---
 
@@ -71,29 +85,21 @@ async function encField(key, text, aad) {
 // → Chiffre name, password, url, notes avec un IV unique pour chaque champ
 // → Renvoie un objet prêt à être envoyé à l’API
 export async function encryptEntrySeparateFields(password) {
-
-    // Récupère les valeurs directement dans le DOM
     const get = id => document.getElementById(id)?.value ?? "";
     const name = get("name"), pwd = get("pwd"), url = get("url"), notes = get("notes");
-
-    // Génére un sel aléatoire (16 octets)
     const salt = crypto.getRandomValues(new Uint8Array(16));
-
-    // Dérive la clé à partir du mot de passe maître + sel
     const key = await deriveKeyPBKDF2(password, b64(salt), 600000);
 
-    // Chiffre chaque champ avec un IV différent et un AAD descriptif
     const p  = await encField(key, pwd,   "field:password");
     const n  = await encField(key, name,  "field:name");
     const u  = await encField(key, url,   "field:url");
     const no = await encField(key, notes, "field:notes");
 
-    // Retourne l’ensemble des données chiffrées + paramètres de dérivation
     return {
-        cipherPasswordB64: p.cipherB64, ivPasswordB64: p.ivB64,
-        cipherNameB64:     n.cipherB64, ivNameB64:     n.ivB64,
-        cipherUrlB64:      u.cipherB64, ivUrlB64:      u.ivB64,
-        cipherNotesB64:    no.cipherB64, ivNotesB64:   no.ivB64,
+        cipherPasswordB64: p.cipherB64, tagPasswordB64: p.tagB64, ivPasswordB64: p.ivB64,
+        cipherNameB64:     n.cipherB64, tagNameB64:     n.tagB64, ivNameB64:     n.ivB64,
+        cipherUrlB64:      u.cipherB64, tagUrlB64:      u.tagB64, ivUrlB64:      u.ivB64,
+        cipherNotesB64:    no.cipherB64,tagNotesB64:    no.tagB64,ivNotesB64:    no.ivB64,
         saltB64: b64(salt),
         iterations: 600000
     };
@@ -106,26 +112,25 @@ export async function encryptEntrySeparateFields(password) {
 // → Re-dérive la même clé AES
 // → Déchiffre chaque champ séparément (en utilisant ses IV et AAD)
 export async function decryptEntrySeparateFields(record, password) {
-
-    // Re-dérive la clé AES à partir du mot de passe maître et du sel stocké
     const key = await deriveKeyPBKDF2(password, record.saltB64, record.iterations);
 
-    // Fonction interne de déchiffrement d’un champ
-    const dec = async (cipherB64, ivB64, aad) => {
+    const dec = async (cipherB64, tagB64, ivB64, aad) => {
+        const cipherU8 = b64d(cipherB64);
+        const tagU8 = b64d(tagB64);
+        const ctFull = joinCtAndTag(cipherU8, tagU8);
         const pt = await crypto.subtle.decrypt(
             { name: "AES-GCM", iv: b64d(ivB64), additionalData: aad ? enc.encode(aad) : undefined },
             key,
-            b64d(cipherB64)
+            ctFull
         );
         return new TextDecoder().decode(pt);
     };
 
-    // Retourne les 4 champs déchiffrés (en clair, côté client uniquement)
     return {
-        password: await dec(record.cipherPasswordB64, record.ivPasswordB64, "field:password"),
-        name:     await dec(record.cipherNameB64,     record.ivNameB64,     "field:name"),
-        url:      await dec(record.cipherUrlB64,      record.ivUrlB64,      "field:url"),
-        notes:    await dec(record.cipherNotesB64,    record.ivNotesB64,    "field:notes"),
+        password: await dec(record.cipherPasswordB64, record.tagPasswordB64, record.ivPasswordB64, "field:password"),
+        name:     await dec(record.cipherNameB64,     record.tagNameB64,     record.ivNameB64,     "field:name"),
+        url:      await dec(record.cipherUrlB64,      record.tagUrlB64,      record.ivUrlB64,      "field:url"),
+        notes:    await dec(record.cipherNotesB64,    record.tagNotesB64,    record.ivNotesB64,    "field:notes"),
     };
 }
 

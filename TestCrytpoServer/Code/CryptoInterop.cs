@@ -17,7 +17,7 @@ public class CryptoInterop
 
     private async Task<IJSObjectReference> Mod()
     {
-        var url = new Uri(new Uri(_nav.BaseUri), "js/crypto.js?v=8").ToString();
+        var url = new Uri(new Uri(_nav.BaseUri), "js/crypto.js?v=9").ToString();
         return _mod ??= await _js.InvokeAsync<IJSObjectReference>("import", url);
     }
 

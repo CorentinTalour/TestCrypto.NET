@@ -42,15 +42,24 @@ app.MapPost("/api/secrets", async (SecretStore store, SecretRecordIn input) =>
 {
     var rec = new SecretRecord
     {
-        CipherPasswordB64 = input.cipherPasswordB64, IvPasswordB64 = input.ivPasswordB64,
-        CipherNameB64     = input.cipherNameB64,     IvNameB64     = input.ivNameB64,
-        CipherUrlB64      = input.cipherUrlB64,      IvUrlB64      = input.ivUrlB64,
-        CipherNotesB64    = input.cipherNotesB64,    IvNotesB64    = input.ivNotesB64,
-        SaltB64           = input.saltB64,           Iterations    = input.iterations
+        CipherPasswordB64 = input.cipherPasswordB64, TagPasswordB64 = input.tagPasswordB64,
+        IvPasswordB64 = input.ivPasswordB64,
+        CipherNameB64 = input.cipherNameB64, TagNameB64 = input.tagNameB64, IvNameB64 = input.ivNameB64,
+        CipherUrlB64 = input.cipherUrlB64, TagUrlB64 = input.tagUrlB64, IvUrlB64 = input.ivUrlB64,
+        CipherNotesB64 = input.cipherNotesB64, TagNotesB64 = input.tagNotesB64, IvNotesB64 = input.ivNotesB64,
+        SaltB64 = input.saltB64, Iterations = input.iterations
     };
     await store.AddAsync(rec);
     return Results.Ok(new { id = rec.Id });
 }).DisableAntiforgery();
+
+// app.MapPost("/api/secrets", async (HttpRequest req) =>
+// {
+//     using var reader = new StreamReader(req.Body);
+//     var body = await reader.ReadToEndAsync();
+//     Console.WriteLine("[/api/secrets] BODY RAW: " + body);
+//     return Results.BadRequest("DEBUG BODY PRINTED"); // évite d'insérer en base
+// });
 
 app.MapGet("/api/secrets/{id:int}", async (SecretStore store, int id) =>
 {
@@ -58,10 +67,10 @@ app.MapGet("/api/secrets/{id:int}", async (SecretStore store, int id) =>
     return r is null ? Results.NotFound() :
         Results.Ok(new {
             r.Id,
-            r.CipherPasswordB64, r.IvPasswordB64,
-            r.CipherNameB64,     r.IvNameB64,
-            r.CipherUrlB64,      r.IvUrlB64,
-            r.CipherNotesB64,    r.IvNotesB64,
+            r.CipherPasswordB64, r.TagPasswordB64, r.IvPasswordB64,
+            r.CipherNameB64,     r.TagNameB64,     r.IvNameB64,
+            r.CipherUrlB64,      r.TagUrlB64,      r.IvUrlB64,
+            r.CipherNotesB64,    r.TagNotesB64,    r.IvNotesB64,
             r.SaltB64,           r.Iterations
         });
 }).DisableAntiforgery();
@@ -124,8 +133,8 @@ app.Run();
 
 // --- RECORDS POUR SECRETS UNIQUEMENT ---
 public record SecretRecordIn(
-    string cipherPasswordB64, string ivPasswordB64,
-    string cipherNameB64,     string ivNameB64,
-    string cipherUrlB64,      string ivUrlB64,
-    string cipherNotesB64,    string ivNotesB64,
+    string cipherPasswordB64, string tagPasswordB64, string ivPasswordB64,
+    string cipherNameB64,     string tagNameB64,     string ivNameB64,
+    string cipherUrlB64,      string tagUrlB64,      string ivUrlB64,
+    string cipherNotesB64,    string tagNotesB64,    string ivNotesB64,
     string saltB64, int iterations);
