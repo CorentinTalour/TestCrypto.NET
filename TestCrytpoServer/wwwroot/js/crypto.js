@@ -3,8 +3,8 @@
 // ==============================
 
 /**
- * Lit le mot de passe maître depuis un <input> et génère les paramètres
- * de création d’un vault (salt + verifier). Le mot de passe ne sort jamais.
+ * Lit le MP depuis un <input> et génère les paramètres de création du vault.
+ * → Ne renvoie JAMAIS le mot de passe, ni de key material.
  */
 export async function createVaultVerifierFromInput(inputId, iterations = 600000) {
     const pwd = document.getElementById(inputId)?.value ?? "";
@@ -12,16 +12,20 @@ export async function createVaultVerifierFromInput(inputId, iterations = 600000)
 }
 
 /**
- * Ouvre un vault existant en lisant le mot de passe maître depuis un <input>.
- * Vérifie côté serveur (envoi du verifier seulement), puis garde la clé AES en RAM.
+ * Ouvre un vault existant en lisant le MP depuis un <input>.
+ * → Ne renvoie pas le MP. Garde la clé AES non-extractable en RAM.
  */
-export async function openVaultFromInput(vaultId, inputId) {
+export async function openVaultFromInput(vaultId, inputId, autoLockMs = 300000) {
     const pwd = document.getElementById(inputId)?.value ?? "";
-    return await openVault(vaultId, pwd);
+    const res = await openVault(vaultId, pwd, autoLockMs);
+    // Efface visuellement le champ MP après usage
+    const el = document.getElementById(inputId);
+    if (el) el.value = "";
+    return res;
 }
 
 // ==============================
-// UTILS ENCODAGE / DÉCODAGE
+// Encodage / décodage
 // ==============================
 
 const enc = new TextEncoder();
@@ -33,7 +37,6 @@ function splitCtAndTag(buf) {
     const u = new Uint8Array(buf);
     return { cipher: u.slice(0, u.length - TAG_BYTES), tag: u.slice(u.length - TAG_BYTES) };
 }
-
 function joinCtAndTag(cipherU8, tagU8) {
     const out = new Uint8Array(cipherU8.length + tagU8.length);
     out.set(cipherU8, 0);
@@ -42,78 +45,95 @@ function joinCtAndTag(cipherU8, tagU8) {
 }
 
 // ==============================
-// GÉNÉRATION & VÉRIFICATION DU VAULT
+// Création & vérification du vault (le plus strict)
 // ==============================
 
 /**
- * Création d’un vault côté client :
- * - génère un salt
- * - dérive 64 octets via PBKDF2-SHA256
- * - verifier = SHA-256(premiers 32 octets)
- * - ⛔ n’expose PAS la moitié “clé” (derniers 32 octets)
+ * Création côté client :
+ * - génère vaultSalt (16o)
+ * - deriveBits 256 bits via PBKDF2-SHA256 (uniquement pour le vérifieur)
+ * - verifier = SHA-256(deriveBits_256)
+ * - zéroise les buffers
+ * → Aucun "key material" exposé.
  */
 export async function createVaultVerifier(password, iterations = 600000) {
     const vaultSalt = crypto.getRandomValues(new Uint8Array(16));
     const vaultSaltB64 = b64(vaultSalt);
 
-    // deriveBits pour fabriquer le verifier
     const pwKey = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits(
         { name: "PBKDF2", hash: "SHA-256", salt: vaultSalt, iterations },
         pwKey,
-        512
+        256 // 256 bits (32o) uniquement pour le vérifieur
     );
 
     const b = new Uint8Array(bits);
-    const verifyPart = b.subarray(0, 32); // vue sans copie
-    const verifierHash = await crypto.subtle.digest("SHA-256", verifyPart);
-
-    // best-effort wipe (JS ne garantit pas, mais c’est mieux que rien)
-    b.fill(0);
+    const verifierHash = await crypto.subtle.digest("SHA-256", b);
+    b.fill(0); // best-effort wipe
 
     return {
         vaultSaltB64,
         iterations,
-        verifierB64: b64(verifierHash) // à stocker en BDD
+        verifierB64: b64(verifierHash)
     };
 }
 
 /**
- * Recalcule uniquement le verifier depuis password + salt/iterations.
- * ⛔ N’expose pas de “key material”.
+ * Recalcule seulement le vérifieur (même logique que ci-dessus).
  */
 export async function computeVerifierFromPassword(password, vaultSaltB64, iterations = 600000) {
     const pwKey = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits(
         { name: "PBKDF2", hash: "SHA-256", salt: b64d(vaultSaltB64), iterations },
         pwKey,
-        512
+        256
     );
     const b = new Uint8Array(bits);
-    const verifyPart = b.subarray(0, 32);
-    const verifierHash = await crypto.subtle.digest("SHA-256", verifyPart);
+    const verifierHash = await crypto.subtle.digest("SHA-256", b);
     b.fill(0);
     return { verifierB64: b64(verifierHash) };
 }
 
 // ==============================
-// GESTION DU VAULT EN RAM (clé AES non-extractable)
+// Gestion du vault en RAM (clé AES non-extractable) + auto-lock
 // ==============================
 
 let currentVault = { id: null, key: /** @type {CryptoKey|null} */(null) };
+let _autoLockTimer = /** @type {ReturnType<typeof setTimeout>|null} */ (null);
+let _autoLockMsDefault = 300000; // 5 min par défaut
+
+function _clearAutoLock() {
+    if (_autoLockTimer) { clearTimeout(_autoLockTimer); _autoLockTimer = null; }
+}
+function _armAutoLock(ms) {
+    _clearAutoLock();
+    _autoLockTimer = setTimeout(() => lockNow(), ms);
+}
+
+/** Verrouille immédiatement (oublie la clé en RAM) */
+export function lockNow() {
+    currentVault = { id: null, key: null };
+    _clearAutoLock();
+    clearVaultList();
+}
+
+/** Reset le timer d’auto-lock (à appeler sur toute interaction sensible) */
+export function touchVault() {
+    if (currentVault.key) _armAutoLock(_autoLockMsDefault);
+}
 
 /**
  * Ouvre un vault :
- * - récupère salt/iterations
- * - calcule verifier (deriveBits) et le poste à /check
- * - si ok, dérive directement la CryptoKey AES-GCM non-extractable (deriveKey)
- *   → la clé reste en RAM (currentVault.key) et n’est jamais exportée
+ * - GET /params → {vaultSaltB64, iterations}
+ * - deriveBits(256) → POST /check verifierB64
+ * - si ok → deriveKey PBKDF2→AES-GCM(256) non-extractable, stockée en RAM
+ * - arme l’auto-lock
+ *  - auto-lock permet de fermer le coffre après inactivité
  */
-export async function openVault(vaultId, password) {
-    const p = await (await fetch(`/api/vaults/${vaultId}/params`)).json(); // { vaultSaltB64, iterations }
-
-    // 1) Verifier
+export async function openVault(vaultId, password, autoLockMs = 300000) {
+    const p = await (await fetch(`/api/vaults/${vaultId}/params`)).json();
     const { verifierB64 } = await computeVerifierFromPassword(password, p.vaultSaltB64, p.iterations);
+
     const check = await (await fetch(`/api/vaults/${vaultId}/check`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -122,22 +142,24 @@ export async function openVault(vaultId, password) {
 
     if (!check.ok) return { ok: false, error: "Mot de passe maître invalide." };
 
-    // 2) Clé AES-GCM non-extractable via deriveKey (aucun encKeyMaterial n’est exposé)
+    // deriveKey séparée : crée DIRECTEMENT une CryptoKey AES non-extractable
     const pwKey = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveKey"]);
     const aesKey = await crypto.subtle.deriveKey(
         { name: "PBKDF2", hash: "SHA-256", salt: b64d(p.vaultSaltB64), iterations: p.iterations },
         pwKey,
         { name: "AES-GCM", length: 256 },
-        false, // non-extractable
+        false,
         ["encrypt", "decrypt"]
     );
 
     currentVault = { id: vaultId, key: aesKey };
+    _autoLockMsDefault = autoLockMs || 300000;
+    _armAutoLock(_autoLockMsDefault);
     return { ok: true };
 }
 
 // ==============================
-// CHIFFREMENT / DÉCHIFFREMENT DES ENTRÉES
+// Chiffrement / déchiffrement des entrées
 // ==============================
 
 async function encFieldWithVaultKey(text, aad) {
@@ -149,6 +171,7 @@ async function encFieldWithVaultKey(text, aad) {
         enc.encode(text ?? "")
     );
     const { cipher, tag } = splitCtAndTag(ctFull);
+    touchVault();
     return { cipher, tag, iv };
 }
 
@@ -160,23 +183,25 @@ async function decFieldWithVaultKey(cipherU8, tagU8, ivU8, aad) {
         currentVault.key,
         full
     );
+    touchVault();
     return new TextDecoder().decode(pt);
 }
 
 /**
- * Chiffre une nouvelle entrée (name/password/url/notes) via la clé du vault.
- * Retourne des champs Base64 (cipher, tag, iv) pour un POST JSON.
+ * Chiffre une nouvelle entrée (DOM → JSON Base64).
+ * AAD liée au contexte (vault + type de champ) pour “bind” le ciphertext.
  */
 export async function encryptEntryForOpenVault() {
     if (!currentVault.key) throw new Error("Vault non ouvert");
     const get = id => document.getElementById(id)?.value ?? "";
     const name = get("name"), pwd = get("pwd"), url = get("url"), notes = get("notes");
 
-    // AAD minimale par champ (tu peux lier au vaultId si tu veux)
-    const p  = await encFieldWithVaultKey(pwd,   "field:password");
-    const n  = await encFieldWithVaultKey(name,  "field:name");
-    const u  = await encFieldWithVaultKey(url,   "field:url");
-    const no = await encFieldWithVaultKey(notes, "field:notes");
+    const ns = `vault:${currentVault.id}`;
+
+    const p  = await encFieldWithVaultKey(pwd,   `${ns}|field:password`);
+    const n  = await encFieldWithVaultKey(name,  `${ns}|field:name`);
+    const u  = await encFieldWithVaultKey(url,   `${ns}|field:url`);
+    const no = await encFieldWithVaultKey(notes, `${ns}|field:notes`);
 
     return {
         cipherPasswordB64: b64(p.cipher), tagPasswordB64: b64(p.tag), ivPasswordB64: b64(p.iv),
@@ -186,52 +211,64 @@ export async function encryptEntryForOpenVault() {
     };
 }
 
-/**
- * Déchiffre une entrée (venue chiffrée de l’API) côté client.
- */
+/** Déchiffre une entrée (API → clair côté client). */
 export async function decryptVaultEntry(record) {
+    const ns = `vault:${currentVault.id}`;
     const out = {};
-    out.password = await decFieldWithVaultKey(b64d(record.cipherPasswordB64), b64d(record.tagPasswordB64), b64d(record.ivPasswordB64), "field:password");
-    out.name     = await decFieldWithVaultKey(b64d(record.cipherNameB64),     b64d(record.tagNameB64),     b64d(record.ivNameB64),     "field:name");
-    out.url      = await decFieldWithVaultKey(b64d(record.cipherUrlB64),      b64d(record.tagUrlB64),      b64d(record.ivUrlB64),      "field:url");
-    out.notes    = await decFieldWithVaultKey(b64d(record.cipherNotesB64),    b64d(record.tagNotesB64),    b64d(record.ivNotesB64),    "field:notes");
+    out.password = await decFieldWithVaultKey(b64d(record.cipherPasswordB64), b64d(record.tagPasswordB64), b64d(record.ivPasswordB64), `${ns}|field:password`);
+    out.name     = await decFieldWithVaultKey(b64d(record.cipherNameB64),     b64d(record.tagNameB64),     b64d(record.ivNameB64),     `${ns}|field:name`);
+    out.url      = await decFieldWithVaultKey(b64d(record.cipherUrlB64),      b64d(record.tagUrlB64),      b64d(record.ivUrlB64),      `${ns}|field:url`);
+    out.notes    = await decFieldWithVaultKey(b64d(record.cipherNotesB64),    b64d(record.tagNotesB64),    b64d(record.ivNotesB64),    `${ns}|field:notes`);
     return out;
 }
 
 // ==============================
-// Rendu DOM côté client
+// Rendu DOM (sans innerHTML sur valeurs sensibles) + auto-lock touch
 // ==============================
 
-/**
- * Rend la liste des entrées dans #vault-list après déchiffrement côté client.
- */
 export async function renderVaultEntries(records) {
     const list = document.getElementById("vault-list");
-    if (!list) return;                  // garde-fou DOM
-    list.innerHTML = "";
+    if (!list) return;
+    list.textContent = "";
 
     if (!records || records.length === 0) {
-        list.innerHTML = "<em>Aucune entrée.</em>";
+        const em = document.createElement("em");
+        em.textContent = "Aucune entrée.";
+        list.appendChild(em);
         return;
     }
 
     for (const rec of records) {
         const dec = await decryptVaultEntry(rec);
-        const item = document.createElement("div");
-        item.className = "entry";
-        item.style.marginBottom = "1rem";
-        item.innerHTML = `
-      <strong>${dec.name}</strong><br>
-      <div>Mot de passe : ${dec.password}</div>
-      <div>URL : ${dec.url}</div>
-      <div>Notes : ${dec.notes}</div>
-    `;
-        list.appendChild(item);
+
+        const wrap = document.createElement("div");
+        wrap.className = "entry";
+        wrap.style.marginBottom = "1rem";
+
+        const name = document.createElement("strong");
+        name.textContent = dec.name;
+
+        const pwd = document.createElement("div");
+        pwd.textContent = `Mot de passe : ${dec.password}`;
+
+        const url = document.createElement("div");
+        url.textContent = `URL : ${dec.url}`;
+
+        const notes = document.createElement("div");
+        notes.textContent = `Notes : ${dec.notes}`;
+
+        wrap.appendChild(name);
+        wrap.appendChild(document.createElement("br"));
+        wrap.appendChild(pwd);
+        wrap.appendChild(url);
+        wrap.appendChild(notes);
+        list.appendChild(wrap);
     }
+
+    touchVault();
 }
 
-/** Vide le conteneur #vault-list (ex: quand on ferme le vault). */
 export function clearVaultList() {
     const list = document.getElementById("vault-list");
-    if (list) list.innerHTML = "";
+    if (list) list.textContent = "";
 }
