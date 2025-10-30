@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using TestCrytpoServer.Code;
 using TestCrytpoServer.Components;
@@ -35,53 +37,94 @@ app.MapRazorComponents<App>()
 
 
 // ----------------------------------------------------------------------
+// Helpers PBKDF2 / Base64
+// ----------------------------------------------------------------------
+static byte[] DerivePbkdf2Sha256(string password, byte[] salt, int iterations, int dkLenBytes = 32)
+{
+    var pwdBytes = Encoding.UTF8.GetBytes(password ?? string.Empty);
+    var dk = new byte[dkLenBytes];
+    Rfc2898DeriveBytes.Pbkdf2(
+        password: pwdBytes,
+        salt: salt,
+        iterations: iterations,
+        hashAlgorithm: HashAlgorithmName.SHA256,
+        destination: dk
+    );
+    Array.Clear(pwdBytes, 0, pwdBytes.Length);
+    return dk;
+}
+
+static string B64(byte[] b) => Convert.ToBase64String(b);
+static byte[] B64d(string s) => Convert.FromBase64String(s);
+
+// ----------------------------------------------------------------------
 // --- API VAULT (mode unique utilisé par l’app)
 // ----------------------------------------------------------------------
 
-// Création d’un vault
+// Création d’un vault : reçoit le MP en clair, génère sel+hash et stocke
 app.MapPost("/api/vaults", async (AppDbContext db, JsonElement input) =>
 {
-    if (!input.TryGetProperty("ownerUserId", out var ownerProp) ||
-        !input.TryGetProperty("vaultSaltB64", out var saltProp) ||
-        !input.TryGetProperty("iterations", out var iterProp) ||
-        !input.TryGetProperty("verifierB64", out var verProp))
-    {
-        return Results.BadRequest("Invalid payload");
-    }
+    // Input attendu : { ownerUserId?: string, password: string, iterations?: number }
+    if (!input.TryGetProperty("password", out var pwdProp))
+        return Results.BadRequest("Missing 'password'");
+
+    string password = pwdProp.GetString() ?? string.Empty;
+    string ownerUserId = input.TryGetProperty("ownerUserId", out var ownerProp) ? (ownerProp.GetString() ?? "") : "";
+    int iterations = input.TryGetProperty("iterations", out var iterProp) ? iterProp.GetInt32() : 600_000;
+    if (iterations <= 0) iterations = 600_000;
+
+    // Génère sel 16o et dérive 32o (PBKDF2-HMAC-SHA256)
+    var salt = RandomNumberGenerator.GetBytes(16);
+    var dk = DerivePbkdf2Sha256(password, salt, iterations); // 32 octets
 
     var v = new Vault
     {
-        OwnerUserId  = ownerProp.GetString() ?? "",
-        VaultSaltB64 = saltProp.GetString() ?? "",
-        Iterations   = iterProp.GetInt32(),
-        VerifierB64  = verProp.GetString() ?? "",
+        OwnerUserId  = ownerUserId,
+        VaultSaltB64 = B64(salt),
+        Iterations   = iterations,
+        // On réutilise la colonne VerifierB64 pour stocker le dérivé PBKDF2
+        VerifierB64  = B64(dk),
         CreatedAt    = DateTimeOffset.UtcNow
     };
 
     db.Vaults.Add(v);
     await db.SaveChangesAsync();
-    return Results.Created($"/api/vaults/{v.Id}", new { id = v.Id });
+
+    // IMPORTANT : renvoyer 'vaultId' pour matcher le front
+    return Results.Created($"/api/vaults/{v.Id}", new {
+        vaultId = v.Id,
+        vaultSaltB64 = v.VaultSaltB64,
+        iterations = v.Iterations
+    });
 }).DisableAntiforgery();
 
 // Lecture des paramètres (pour dérivation côté client)
-app.MapGet("/api/vaults/{id:int}/params", async (AppDbContext db, int id) =>
+app.MapGet("/api/vaults/{vaultId:int}/params", async (AppDbContext db, int vaultId) =>
 {
-    var v = await db.Vaults.FindAsync(id);
+    var v = await db.Vaults.FindAsync(vaultId);
     return v is null
         ? Results.NotFound()
         : Results.Ok(new { v.VaultSaltB64, v.Iterations });
 }).DisableAntiforgery();
 
-// Vérification d’un mot de passe maître (comparer verifierB64)
+// Vérification MP : reçoit le MP en clair, re-dérive et compare (temps constant)
 app.MapPost("/api/vaults/{vaultId:int}/check", async (AppDbContext db, int vaultId, JsonElement input) =>
 {
     var v = await db.Vaults.FindAsync(vaultId);
     if (v is null) return Results.NotFound();
 
-    if (!input.TryGetProperty("verifierB64", out var verProp))
-        return Results.BadRequest("Invalid payload");
+    if (!input.TryGetProperty("password", out var pwdProp))
+        return Results.BadRequest("Missing 'password'");
 
-    bool ok = string.Equals(verProp.GetString(), v.VerifierB64, StringComparison.Ordinal);
+    string password = pwdProp.GetString() ?? string.Empty;
+
+    var salt = B64d(v.VaultSaltB64);
+    var expected = B64d(v.VerifierB64);
+    var dk = DerivePbkdf2Sha256(password, salt, v.Iterations);
+
+    bool ok = CryptographicOperations.FixedTimeEquals(dk, expected);
+    Array.Clear(dk, 0, dk.Length);
+
     return Results.Ok(new { ok });
 }).DisableAntiforgery();
 

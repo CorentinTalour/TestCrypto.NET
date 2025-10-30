@@ -83,31 +83,28 @@ else
     try
     {
       Status = "Création du vault…";
-      // (1) Génère vaultSalt/verifier côté client SANS remonter le MP
+
+      // (1) Crée le vault côté API via le JS (envoie le MP clair au backend).
       var genObj = await CryptoJs.CreateVaultVerifierFromInputAsync("mpCreate", 600_000);
       var gen = (JsonElement)genObj;
-      if (!gen.TryGetProperty("vaultSaltB64", out var _))
-      {
-        // depuis DB reset, il manque le POST ? On gère quand même.
-      }
-      string vaultSaltB64 = gen.GetProperty("vaultSaltB64").GetString()!;
-      int iterations      = gen.GetProperty("iterations").GetInt32();
-      string verifierB64  = gen.GetProperty("verifierB64").GetString()!;
 
-      var http = HttpFactory.CreateClient();
-      var payload = new { ownerUserId = OwnerUserId, vaultSaltB64, iterations, verifierB64 };
-      var resp = await http.PostAsJsonAsync($"{Nav.BaseUri}api/vaults", payload);
-      if (!resp.IsSuccessStatusCode)
-      { Status = $"Erreur API: {(int)resp.StatusCode} {resp.ReasonPhrase}"; return; }
+      // Le backend peut renvoyer { id, vaultSaltB64, iterations } ou { vaultId, ... } selon ta version
+      int newId = 0;
+      if (gen.TryGetProperty("id", out var idProp)) newId = idProp.GetInt32();
+      else if (gen.TryGetProperty("vaultId", out var vidProp)) newId = vidProp.GetInt32();
+      else { Status = "Réponse API invalide: id/vaultId manquant."; return; }
 
-      var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-      VaultId = body.GetProperty("id").GetInt32();
+      VaultId = newId;
 
-      // (2) Ouvre immédiatement, toujours côté client (pas de MP en C#)
+      // (2) Ouvre immédiatement, côté client (pas de MP en C#)
       Status = "Vault créé. Ouverture…";
       var res = (JsonElement)await CryptoJs.OpenVaultFromInputAsync(VaultId, "mpCreate", 300_000);
       bool ok = res.TryGetProperty("ok", out var okProp) && okProp.GetBoolean();
-      if (!ok) { Status = res.TryGetProperty("error", out var e) ? e.GetString() ?? "Erreur" : "Erreur"; return; }
+      if (!ok)
+      {
+        Status = res.TryGetProperty("error", out var e) ? (e.GetString() ?? "Erreur") : "Erreur";
+        return;
+      }
 
       IsOpen = true;
       Status = "Vault ouvert. Chargement…";
@@ -115,7 +112,10 @@ else
       await Task.Delay(50);
       await ReloadEntries();
     }
-    catch (Exception ex) { Status = "ERR CreateAndOpenVault: " + ex.Message; }
+    catch (Exception ex)
+    {
+      Status = "ERR CreateAndOpenVault: " + ex.Message;
+    }
   }
 
   async Task OpenVault()
